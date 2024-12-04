@@ -19,7 +19,6 @@ pub struct BuffPeekAsChunkFiller<B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     _use_p_: PhantomData<P>,
     _use_t_: PhantomData<[T]>,
@@ -30,7 +29,6 @@ impl<B, P, T> BuffPeekAsChunkFiller<B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     pub const fn new(buffer: B) -> Self {
         BuffPeekAsChunkFiller {
@@ -51,7 +49,6 @@ where
 impl<'a, P, T> From<&'a mut P> for BuffPeekAsChunkFiller<&'a mut P, P, T>
 where
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     fn from(value: &'a mut P) -> Self {
         BuffPeekAsChunkFiller::new(value)
@@ -62,7 +59,6 @@ impl<B, P, T> TrChunkFiller<T> for BuffPeekAsChunkFiller<B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     type IoAbort = ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>;
     type FillAsync<'a> = BuffPeekChunkFillAsync<'a, B, P, T> where Self: 'a;
@@ -80,7 +76,6 @@ pub struct BuffPeekChunkFillAsync<'a, B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     filler_: &'a mut BuffPeekAsChunkFiller<B, P, T>,
     target_: &'a mut [T],
@@ -90,7 +85,6 @@ impl<'a, B, P, T> BuffPeekChunkFillAsync<'a, B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     pub fn new(
         filler: &'a mut BuffPeekAsChunkFiller<B, P, T>,
@@ -117,7 +111,6 @@ impl<'a, B, P, T> IntoFuture for BuffPeekChunkFillAsync<'a, B, P, T>
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     type IntoFuture = BuffPeekChunkFillFuture<'a, NonCancellableToken, B, P, T>;
     type Output = <Self::IntoFuture as Future>::Output;
@@ -132,7 +125,6 @@ impl<'a, B, P, T> TrIntoFutureMayCancel<'a> for BuffPeekChunkFillAsync<'a, B, P,
 where
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     type MayCancelOutput = <Self as IntoFuture>::Output;
 
@@ -154,7 +146,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     #[pin]filler_: &'a mut BuffPeekAsChunkFiller<B, P, T>,
     #[pin]target_: &'a mut [T],
@@ -166,7 +157,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     type Output = Result<
         usize,
@@ -185,7 +175,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
-    T: Clone,
 {
     pub fn new(
         filler: &'a mut BuffPeekAsChunkFiller<B, P, T>,

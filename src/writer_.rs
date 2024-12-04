@@ -19,7 +19,6 @@ pub struct BuffWriteAsChunkLoader<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     _use_w_: PhantomData<W>,
     _use_t_: PhantomData<[T]>,
@@ -30,7 +29,6 @@ impl<B, W, T> BuffWriteAsChunkLoader<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     pub const fn new(buffer: B) -> Self {
         BuffWriteAsChunkLoader {
@@ -51,7 +49,6 @@ where
 impl<'a, W, T> From<&'a mut W> for BuffWriteAsChunkLoader<&'a mut W, W, T>
 where
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     fn from(value: &'a mut W) -> Self {
         BuffWriteAsChunkLoader::new(value)
@@ -62,7 +59,6 @@ impl<B, W, T> TrChunkLoader<T> for BuffWriteAsChunkLoader<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     type IoAbort = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>;
     type LoadAsync<'a> = BuffWriteChunkLoadAsync<'a, B, W, T> where Self: 'a;
@@ -77,7 +73,6 @@ pub struct BuffWriteChunkLoadAsync<'a, B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     loader_: &'a mut BuffWriteAsChunkLoader<B, W, T>,
     source_: &'a [T],
@@ -87,7 +82,6 @@ impl<'a, B, W, T> BuffWriteChunkLoadAsync<'a, B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     pub fn new(
         loader: &'a mut BuffWriteAsChunkLoader<B, W, T>,
@@ -114,7 +108,6 @@ impl<'a, B, W, T> IntoFuture for BuffWriteChunkLoadAsync<'a, B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     type IntoFuture = BuffWriteChunkLoadFuture<'a, NonCancellableToken, B, W, T>;
     type Output = <Self::IntoFuture as Future>::Output;
@@ -129,7 +122,6 @@ impl<'a, B, W, T> TrIntoFutureMayCancel<'a> for BuffWriteChunkLoadAsync<'a, B, W
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     type MayCancelOutput = <<Self as IntoFuture>::IntoFuture as Future>::Output;
 
@@ -151,7 +143,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     #[pin]loader_: &'a mut BuffWriteAsChunkLoader<B, W, T>,
     source_: &'a [T],
@@ -163,7 +154,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     type Output = Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>>;
 
@@ -179,7 +169,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
-    T: Clone,
 {
     pub fn new(
         loader: &'a mut BuffWriteAsChunkLoader<B, W, T>,

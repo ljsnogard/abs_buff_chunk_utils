@@ -20,10 +20,7 @@ pub trait TrChunkIoAbort {
 /// A reader that is supposed to copy the minimum number of units (for example,
 /// bytes), from the internal buffer this reader is holding, into the target
 /// buffer.
-pub trait TrChunkFiller<T = u8>
-where
-    T: Clone,
-{
+pub trait TrChunkFiller<T = u8> {
     type IoAbort: TrChunkIoAbort;
 
     type FillAsync<'a>: TrIntoFutureMayCancel<'a, MayCancelOutput =
@@ -41,10 +38,7 @@ where
 /// A writer that is supposed to copy the minimum number of units (for example, 
 /// bytes), from the source buffer, into the internal buffer this writer is
 /// holding.
-pub trait TrChunkLoader<T = u8>
-where
-    T: Clone,
-{
+pub trait TrChunkLoader<T = u8> {
     type IoAbort: TrChunkIoAbort;
 
     type LoadAsync<'a>: TrIntoFutureMayCancel<'a, MayCancelOutput = 

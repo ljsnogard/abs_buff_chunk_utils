@@ -19,7 +19,6 @@ pub struct BuffReadAsChunkFiller<B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     _use_r_: PhantomData<R>,
     _use_t_: PhantomData<[T]>,
@@ -30,7 +29,6 @@ impl<B, R, T> BuffReadAsChunkFiller<B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     pub const fn new(read: B) -> Self {
         BuffReadAsChunkFiller {
@@ -51,7 +49,6 @@ where
 impl<'a, R, T> From<&'a mut R> for BuffReadAsChunkFiller<&'a mut R, R, T>
 where
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     fn from(value: &'a mut R) -> Self {
         BuffReadAsChunkFiller::new(value)
@@ -62,7 +59,6 @@ impl<B, R, T> TrChunkFiller<T> for BuffReadAsChunkFiller<B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     type IoAbort = ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>;
     type FillAsync<'a> = BuffReadChunkFillAsync<'a, B, R, T> where Self: 'a;
@@ -80,7 +76,6 @@ pub struct BuffReadChunkFillAsync<'a, B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     filler_: &'a mut BuffReadAsChunkFiller<B, R, T>,
     target_: &'a mut [T],
@@ -90,7 +85,6 @@ impl<'a, B, R, T> BuffReadChunkFillAsync<'a, B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     pub fn new(
         filler: &'a mut BuffReadAsChunkFiller<B, R, T>,
@@ -117,7 +111,6 @@ impl<'a, B, R, T> IntoFuture for BuffReadChunkFillAsync<'a, B, R, T>
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     type IntoFuture = BuffReadChunkFillFuture<'a, NonCancellableToken, B, R, T>;
     type Output = <Self::IntoFuture as Future>::Output;
@@ -132,7 +125,6 @@ impl<'a, B, R, T> TrIntoFutureMayCancel<'a> for BuffReadChunkFillAsync<'a, B, R,
 where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     type MayCancelOutput = <Self as IntoFuture>::Output;
 
@@ -154,7 +146,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     #[pin]filler_: &'a mut BuffReadAsChunkFiller<B, R, T>,
     #[pin]target_: &'a mut [T],
@@ -166,7 +157,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     type Output = Result<
         usize,
@@ -185,7 +175,6 @@ where
     C: TrCancellationToken,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
-    T: Clone,
 {
     pub fn new(
         filler: &'a mut BuffReadAsChunkFiller<B, R, T>,
