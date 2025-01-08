@@ -1,21 +1,23 @@
 ﻿use core::{
-    borrow::BorrowMut,
+    borrow::{Borrow, BorrowMut},
     cmp,
     future::{Future, IntoFuture},
+    iter::IntoIterator,
     marker::PhantomData,
+    ops::AsyncFnOnce,
     pin::Pin,
-    task::{Context, Poll},
 };
 
-use pin_project::pin_project;
-use pin_utils::pin_mut;
+use abs_buff::{
+    x_deps::abs_sync,
+    Chunk, TrBuffIterWrite,
+};
+use abs_sync::cancellation::{
+    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel};
 
-use abs_buff::{x_deps::abs_sync, TrBuffIterWrite};
-use abs_sync::{cancellation::*, x_deps::pin_utils};
+use crate::{ChunkIoAbort, TrChunkDumper};
 
-use crate::{ChunkIoAbort, TrChunkLoader};
-
-pub struct BuffWriteAsChunkLoader<B, W, T>
+pub struct ChunkDumper<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
@@ -25,170 +27,118 @@ where
     buffer_: B,
 }
 
-impl<B, W, T> BuffWriteAsChunkLoader<B, W, T>
+impl<B, W, T> ChunkDumper<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     pub const fn new(buffer: B) -> Self {
-        BuffWriteAsChunkLoader {
+        ChunkDumper {
             _use_w_: PhantomData,
             _use_t_: PhantomData,
             buffer_: buffer,
         }
     }
 
-    pub fn load_async<'a>(
+    pub fn dump_async<'a, I, S>(
         &'a mut self,
-        source: &'a [T],
-    ) -> BuffWriteChunkLoadAsync<'a, B, W, T> {
-        BuffWriteChunkLoadAsync::new(self, source)
+        source: Chunk<I, S>,
+    ) -> DumpAsync<'a, I, S, B, W, T>
+    where
+        I: 'a + IntoIterator<Item = T>,
+        S: 'a + Borrow<[T]>,
+    {
+        DumpAsync::new(self, source)
     }
 }
 
-impl<'a, W, T> From<&'a mut W> for BuffWriteAsChunkLoader<&'a mut W, W, T>
+impl<'a, W, T> From<&'a mut W> for ChunkDumper<&'a mut W, W, T>
 where
     W: TrBuffIterWrite<T>,
 {
     fn from(value: &'a mut W) -> Self {
-        BuffWriteAsChunkLoader::new(value)
+        ChunkDumper::new(value)
     }
 }
 
-impl<B, W, T> TrChunkLoader<T> for BuffWriteAsChunkLoader<B, W, T>
+impl<B, W, T> TrChunkDumper<T> for ChunkDumper<B, W, T>
 where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
-    type IoAbort = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>;
-    type LoadAsync<'a> = BuffWriteChunkLoadAsync<'a, B, W, T> where Self: 'a;
+    type IoAbort<'a> = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>
+    where
+        T: 'a,
+        Self: 'a;
 
-    #[inline(always)]
-    fn load_async<'a>(&'a mut self, source: &'a [T]) -> Self::LoadAsync<'a> {
-        BuffWriteAsChunkLoader::load_async(self, source)
+    type DumpAsync<'a, I, S> = DumpAsync<'a, I, S, B, W, T>
+    where
+        I: 'a + IntoIterator<Item = T>,
+        S: 'a + Borrow<[T]>,
+        T: 'a,
+        Self: 'a;
+
+    #[inline]
+    fn dump_async<'a, I, S>(
+        &'a mut self,
+        source: Chunk<I, S>,
+    ) -> Self::DumpAsync<'a, I, S>
+    where
+        I: 'a + IntoIterator<Item = T>,
+        S: 'a + Borrow<[T]>,
+        T: 'a,
+    {
+        ChunkDumper::dump_async(self, source)
     }
 }
 
-pub struct BuffWriteChunkLoadAsync<'a, B, W, T>
+pub struct DumpAsync<'a, I, S, B, W, T>
 where
+    I: IntoIterator,
+    S: Borrow<[I::Item]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
-    loader_: &'a mut BuffWriteAsChunkLoader<B, W, T>,
-    source_: &'a [T],
+    dumper_: &'a mut ChunkDumper<B, W, T>,
+    source_: Chunk<I, S>,
 }
 
-impl<'a, B, W, T> BuffWriteChunkLoadAsync<'a, B, W, T>
+impl<'a, I, S, B, W, T> DumpAsync<'a, I, S, B, W, T>
 where
+    I: IntoIterator<Item = T>,
+    S: Borrow<[T]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
-    pub fn new(
-        loader: &'a mut BuffWriteAsChunkLoader<B, W, T>,
-        source: &'a [T],
+    pub const fn new(
+        dumper: &'a mut ChunkDumper<B, W, T>,
+        source: Chunk<I, S>,
     ) -> Self {
-        BuffWriteChunkLoadAsync {
-            loader_: loader,
+        DumpAsync {
+            dumper_: dumper,
             source_: source,
         }
     }
 
-    pub fn may_cancel_with<C>(
+    pub async fn may_cancel_with<C: TrCancellationToken>(
         self,
         cancel: Pin<&'a mut C>,
-    ) -> BuffWriteChunkLoadFuture<'a, C, B, W, T>
-    where
-        C: TrCancellationToken,
-    {
-        BuffWriteChunkLoadFuture::new(self.loader_, self.source_, cancel)
+    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>> {
+        todo!()
     }
-}
 
-impl<'a, B, W, T> IntoFuture for BuffWriteChunkLoadAsync<'a, B, W, T>
-where
-    B: BorrowMut<W>,
-    W: TrBuffIterWrite<T>,
-{
-    type IntoFuture = BuffWriteChunkLoadFuture<'a, NonCancellableToken, B, W, T>;
-    type Output = <Self::IntoFuture as Future>::Output;
-
-    fn into_future(self) -> Self::IntoFuture {
-        let cancel = NonCancellableToken::pinned();
-        BuffWriteChunkLoadFuture::new(self.loader_, self.source_, cancel)
-    }
-}
-
-impl<'a, B, W, T> TrIntoFutureMayCancel<'a> for BuffWriteChunkLoadAsync<'a, B, W, T>
-where
-    B: BorrowMut<W>,
-    W: TrBuffIterWrite<T>,
-{
-    type MayCancelOutput = <<Self as IntoFuture>::IntoFuture as Future>::Output;
-
-    #[inline(always)]
-    fn may_cancel_with<C>(
+    async fn dump_slice_async_<C, TSlice, TElem>(
         self,
-        cancel: Pin<&'a mut C>,
-    ) -> impl Future<Output = Self::MayCancelOutput>
+        source: TSlice,
+        mut cancel: Pin<&'a mut C>,
+    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>>
     where
         C: TrCancellationToken,
+        TSlice: Borrow<[TElem]>,
+        TElem: Clone,
     {
-        BuffWriteChunkLoadAsync::may_cancel_with(self, cancel)
-    }
-}
-
-#[pin_project]
-pub struct BuffWriteChunkLoadFuture<'a, C, B, W, T>
-where
-    C: TrCancellationToken,
-    B: BorrowMut<W>,
-    W: TrBuffIterWrite<T>,
-{
-    #[pin]loader_: &'a mut BuffWriteAsChunkLoader<B, W, T>,
-    source_: &'a [T],
-    cancel_: Pin<&'a mut C>,
-}
-
-impl<C, B, W, T> Future for BuffWriteChunkLoadFuture<'_, C, B, W, T>
-where
-    C: TrCancellationToken,
-    B: BorrowMut<W>,
-    W: TrBuffIterWrite<T>,
-{
-    type Output = Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let f = self.load_async_();
-        pin_mut!(f);
-        f.poll(cx)
-    }
-}
-
-impl<'a, C, B, W, T> BuffWriteChunkLoadFuture<'a, C, B, W, T>
-where
-    C: TrCancellationToken,
-    B: BorrowMut<W>,
-    W: TrBuffIterWrite<T>,
-{
-    pub fn new(
-        loader: &'a mut BuffWriteAsChunkLoader<B, W, T>,
-        source: &'a [T],
-        cancel: Pin<&'a mut C>,
-    ) -> Self {
-        BuffWriteChunkLoadFuture {
-            loader_: loader,
-            source_: source,
-            cancel_: cancel,
-        }
-    }
-
-    async fn load_async_(
-        self: Pin<&mut Self>,
-    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>> {
-        let mut this = self.project();
-        let mut loader = this.loader_.as_mut();
-        let buffer = loader.buffer_.borrow_mut();
-        let source = *this.source_;
+        let mut buffer = self.dumper_.buffer_.borrow_mut();
+        let source: &[TElem] = source.borrow();
         let source_len = source.len();
         let mut perform_len = 0usize;
         loop {
@@ -197,18 +147,19 @@ where
             }
             #[cfg(test)]
             log::trace!(
-                "[BuffWriteChunkLoadFuture::load_async_] \
+                "[DumpAsync::dump_slice_async_] \
                 source_len({source_len}), perform_len({perform_len})"
             );
             let w = buffer
                 .write_async(source_len - perform_len)
-                .may_cancel_with(this.cancel_.as_mut())
+                .may_cancel_with(cancel.as_mut())
                 .await;
             let Result::Ok(dst_iter) = w else {
                 let Result::Err(last_error) = w else {
-                    unreachable!("[BuffWriteChunkLoadFuture::load_async_]")
+                    unreachable!("[DumpAsync::dump_slice_async_]")
                 };
-                break Result::Err(ChunkIoAbort::new(perform_len, last_error));
+                let remnants = source_len - perform_len;
+                break Result::Err(ChunkIoAbort::new(last_error, remnants));
             };
             for mut dst in dst_iter.into_iter() {
                 let dst_len = dst.len();
@@ -219,5 +170,74 @@ where
                 perform_len += opr_len;
             }
         }
+    }
+
+    async fn dump_iter_async_(
+        self: Pin<&mut Self>,
+        iter: I
+    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>> {
+        todo!()
+    }
+}
+
+impl<'a, C, I, S, B, W, T> AsyncFnOnce<(Pin<&'a mut C>, )>
+for DumpAsync<'a, I, S, B, W, T>
+where
+    C: TrCancellationToken,
+    I: 'a + IntoIterator<Item = T>,
+    S: 'a + Borrow<[T]>,
+    B: BorrowMut<W>,
+    W: TrBuffIterWrite<T>,
+{
+    type CallOnceFuture = impl Future<Output = Self::Output>;
+    type Output =
+        Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>>;
+
+    extern "rust-call" fn async_call_once(
+        self,
+        args: (Pin<&'a mut C>,),
+    ) -> Self::CallOnceFuture {
+        let cancel = args.0;
+        self.may_cancel_with(cancel)
+    }
+}
+
+impl<'a, I, S, B, W, T> IntoFuture for DumpAsync<'a, I, S, B, W, T>
+where
+    I: 'a + IntoIterator<Item = T>,
+    S: 'a + Borrow<[T]>,
+    B: BorrowMut<W>,
+    W: TrBuffIterWrite<T>,
+{
+    type Output = <Self::IntoFuture as Future>::Output;
+    type IntoFuture = <Self as
+        AsyncFnOnce<(Pin<&'a mut NonCancellableToken>,)>>::CallOnceFuture;
+
+    #[inline]
+    fn into_future(self) -> Self::IntoFuture {
+        self(NonCancellableToken::pinned())
+    }
+}
+
+impl<'a, I, S, B, W, T> TrIntoFutureMayCancel<'a>
+for DumpAsync<'a, I, S, B, W, T>
+where
+    I: 'a + IntoIterator<Item = T>,
+    S: 'a + Borrow<[T]>,
+    B: BorrowMut<W>,
+    W: TrBuffIterWrite<T>,
+{
+    type MayCancelOutput =
+        <<Self as IntoFuture>::IntoFuture as Future>::Output;
+
+    #[inline]
+    fn may_cancel_with<C>(
+        self,
+        cancel: Pin<&'a mut C>,
+    ) -> impl Future<Output = Self::MayCancelOutput>
+    where
+        C: TrCancellationToken,
+    {
+        DumpAsync::may_cancel_with(self, cancel)
     }
 }
