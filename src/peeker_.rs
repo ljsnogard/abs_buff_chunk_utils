@@ -64,7 +64,7 @@ where
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
-    type IoAbort<'a> = ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err, usize,>
+    type IoAbort<'a> = ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>
     where
         T: 'a,
         Self: 'a;
@@ -112,7 +112,7 @@ where
     pub async fn may_cancel_with<C: TrCancellationToken>(
         self,
         mut cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err, usize>> {
+    ) -> Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>> {
         let buffer = self.filler_.buffer_.borrow_mut();
         let target_len = self.target_.len();
         let mut perform_len = 0usize;
@@ -170,7 +170,7 @@ where
 {
     type CallOnceFuture = impl Future<Output = Self::Output>;
     type Output =
-        Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err, usize>>;
+        Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>>;
 
     #[inline]
     extern "rust-call" fn async_call_once(

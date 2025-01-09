@@ -1,3 +1,6 @@
+// specialization for Clone and Copy
+#![feature(min_specialization)]
+
 // to enable no hand-written poll
 #![feature(async_closure)]
 #![feature(async_fn_traits)]
@@ -7,6 +10,7 @@
 #![no_std]
 
 mod abs_;
+mod chunk_io_;
 mod peeker_;
 mod reader_;
 mod writer_;

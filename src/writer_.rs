@@ -1,5 +1,5 @@
 ﻿use core::{
-    borrow::{Borrow, BorrowMut},
+    borrow::BorrowMut,
     cmp,
     future::{Future, IntoFuture},
     iter::IntoIterator,
@@ -8,14 +8,14 @@
     pin::Pin,
 };
 
-use abs_buff::{
-    x_deps::abs_sync,
-    Chunk, TrBuffIterWrite,
-};
+use abs_buff::{x_deps::abs_sync, TrBuffIterWrite};
 use abs_sync::cancellation::{
     NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel};
 
-use crate::{ChunkIoAbort, TrChunkDumper};
+use crate::{
+    chunk_io_::bitwise_copy_items_,
+    ChunkIoAbort, TrChunkDumper,
+};
 
 pub struct ChunkDumper<B, W, T>
 where
@@ -40,14 +40,10 @@ where
         }
     }
 
-    pub fn dump_async<'a, I, S>(
+    pub fn dump_async<'a>(
         &'a mut self,
-        source: Chunk<I, S>,
-    ) -> DumpAsync<'a, I, S, B, W, T>
-    where
-        I: 'a + IntoIterator<Item = T>,
-        S: 'a + Borrow<[T]>,
-    {
+        source: &'a [T],
+    ) -> DumpAsync<'a, B, W, T> {
         DumpAsync::new(self, source)
     }
 }
@@ -66,53 +62,45 @@ where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
-    type IoAbort<'a> = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>
+    type IoAbort<'a> = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>
     where
         T: 'a,
         Self: 'a;
 
-    type DumpAsync<'a, I, S> = DumpAsync<'a, I, S, B, W, T>
+    type DumpAsync<'a> = DumpAsync<'a, B, W, T>
     where
-        I: 'a + IntoIterator<Item = T>,
-        S: 'a + Borrow<[T]>,
         T: 'a,
         Self: 'a;
 
     #[inline]
-    fn dump_async<'a, I, S>(
+    fn dump_async<'a>(
         &'a mut self,
-        source: Chunk<I, S>,
-    ) -> Self::DumpAsync<'a, I, S>
+        source: &'a [T],
+    ) -> Self::DumpAsync<'a>
     where
-        I: 'a + IntoIterator<Item = T>,
-        S: 'a + Borrow<[T]>,
         T: 'a,
     {
         ChunkDumper::dump_async(self, source)
     }
 }
 
-pub struct DumpAsync<'a, I, S, B, W, T>
+pub struct DumpAsync<'a, B, W, T>
 where
-    I: IntoIterator,
-    S: Borrow<[I::Item]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     dumper_: &'a mut ChunkDumper<B, W, T>,
-    source_: Chunk<I, S>,
+    source_: &'a [T],
 }
 
-impl<'a, I, S, B, W, T> DumpAsync<'a, I, S, B, W, T>
+impl<'a, B, W, T> DumpAsync<'a, B, W, T>
 where
-    I: IntoIterator<Item = T>,
-    S: Borrow<[T]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     pub const fn new(
         dumper: &'a mut ChunkDumper<B, W, T>,
-        source: Chunk<I, S>,
+        source: &'a [T],
     ) -> Self {
         DumpAsync {
             dumper_: dumper,
@@ -122,23 +110,10 @@ where
 
     pub async fn may_cancel_with<C: TrCancellationToken>(
         self,
-        cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>> {
-        todo!()
-    }
-
-    async fn dump_slice_async_<C, TSlice, TElem>(
-        self,
-        source: TSlice,
         mut cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>>
-    where
-        C: TrCancellationToken,
-        TSlice: Borrow<[TElem]>,
-        TElem: Clone,
-    {
-        let mut buffer = self.dumper_.buffer_.borrow_mut();
-        let source: &[TElem] = source.borrow();
+    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>> {
+        let target = self.dumper_.buffer_.borrow_mut();
+        let source: &[T] = self.source_;
         let source_len = source.len();
         let mut perform_len = 0usize;
         loop {
@@ -150,7 +125,7 @@ where
                 "[DumpAsync::dump_slice_async_] \
                 source_len({source_len}), perform_len({perform_len})"
             );
-            let w = buffer
+            let w = target
                 .write_async(source_len - perform_len)
                 .may_cancel_with(cancel.as_mut())
                 .await;
@@ -158,40 +133,30 @@ where
                 let Result::Err(last_error) = w else {
                     unreachable!("[DumpAsync::dump_slice_async_]")
                 };
-                let remnants = source_len - perform_len;
-                break Result::Err(ChunkIoAbort::new(last_error, remnants));
+                break Result::Err(ChunkIoAbort::new(last_error, perform_len));
             };
             for mut dst in dst_iter.into_iter() {
                 let dst_len = dst.len();
                 let opr_len = cmp::min(dst_len, source_len - perform_len);
                 debug_assert!(opr_len + perform_len <= source_len);
                 let src = &source[perform_len..perform_len + opr_len];
-                dst.clone_from_slice(src);
+                let dst = &mut dst[..opr_len];
+                unsafe { bitwise_copy_items_(src, dst) };
                 perform_len += opr_len;
             }
         }
     }
-
-    async fn dump_iter_async_(
-        self: Pin<&mut Self>,
-        iter: I
-    ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>> {
-        todo!()
-    }
 }
 
-impl<'a, C, I, S, B, W, T> AsyncFnOnce<(Pin<&'a mut C>, )>
-for DumpAsync<'a, I, S, B, W, T>
+impl<'a, C, B, W, T> AsyncFnOnce<(Pin<&'a mut C>, )> for DumpAsync<'a, B, W, T>
 where
     C: TrCancellationToken,
-    I: 'a + IntoIterator<Item = T>,
-    S: 'a + Borrow<[T]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     type CallOnceFuture = impl Future<Output = Self::Output>;
     type Output =
-        Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err, usize>>;
+        Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>>;
 
     extern "rust-call" fn async_call_once(
         self,
@@ -202,10 +167,8 @@ where
     }
 }
 
-impl<'a, I, S, B, W, T> IntoFuture for DumpAsync<'a, I, S, B, W, T>
+impl<'a, B, W, T> IntoFuture for DumpAsync<'a, B, W, T>
 where
-    I: 'a + IntoIterator<Item = T>,
-    S: 'a + Borrow<[T]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
@@ -219,11 +182,8 @@ where
     }
 }
 
-impl<'a, I, S, B, W, T> TrIntoFutureMayCancel<'a>
-for DumpAsync<'a, I, S, B, W, T>
+impl<'a, B, W, T> TrIntoFutureMayCancel<'a> for DumpAsync<'a, B, W, T>
 where
-    I: 'a + IntoIterator<Item = T>,
-    S: 'a + Borrow<[T]>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {

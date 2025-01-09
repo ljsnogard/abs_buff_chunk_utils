@@ -12,9 +12,11 @@ use abs_buff::{x_deps::abs_sync, TrBuffIterRead};
 use abs_sync::cancellation::{
     NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel,
 };
-use recl_slices::{NoReclaim, SliceMut};
 
-use crate::{ChunkIoAbort, TrChunkFiller};
+use crate::{
+    chunk_io_::bitwise_copy_items_,
+    ChunkIoAbort, TrChunkFiller,
+};
 
 pub struct BuffReadAsChunkFiller<B, R, T>
 where
@@ -61,9 +63,7 @@ where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
-    type IoAbort<'a> = ChunkIoAbort<
-        <R as TrBuffIterRead<T>>::Err,
-        usize>
+    type IoAbort<'a> = ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>
     where
         Self: 'a;
 
@@ -104,19 +104,8 @@ where
 
     pub async fn may_cancel_with<C: TrCancellationToken>(
         self,
-        cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err, usize>> {
-        todo!()
-    }
-
-    async fn fill_clone_async_<C>(
-        self,
         mut cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err, usize>>
-    where
-        T: Clone,
-        C: TrCancellationToken,
-    {
+    ) -> Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>> {
         let buffer = self.filler_.buffer_.borrow_mut();
         let target_len = self.target_.len();
         let mut perform_len = 0usize;
@@ -155,15 +144,8 @@ where
                 debug_assert!(opr_len + perform_len <= target_len);
                 let dst = &mut
                     self.target_[perform_len..perform_len + opr_len];
-                let mut dst = unsafe {
-                    // SliceMut will properly handle the problem of dropping 
-                    // items of the slice caused by transmuting from
-                    // &mut [MaybeUninit<T>] to &mut [T] during overwritting.
-                    SliceMut::new(
-                        dst, 
-                        Option::<NoReclaim>::None)
-                };
-                dst.clone_from_slice(&src);
+                let src = &src[..opr_len];
+                unsafe { bitwise_copy_items_(src, dst) };
                 perform_len += opr_len;
             }
         }
@@ -179,8 +161,7 @@ where
 {
     type CallOnceFuture = impl Future<Output = Self::Output>;
 
-    type Output =
-        Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err, usize>>;
+    type Output = Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>>;
 
     extern "rust-call" fn async_call_once(
         self,

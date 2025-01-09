@@ -1,6 +1,7 @@
 ﻿use core::{
     borrow::{Borrow, BorrowMut},
     mem::MaybeUninit,
+    ops::Deref,
 };
 
 use atomex::{
@@ -16,7 +17,7 @@ use buffex::ring_buffer::*;
 
 use crate::{BuffReadAsChunkFiller, ChunkDumper};
 
-async fn chunk_writer_<B, P, T, O>(writer: BuffTx<B, P, T, O>)
+async fn writer_dumper_<B, P, T, O>(writer: BuffTx<B, P, T, O>)
 where
     B: Borrow<RingBuffer<P, T, O>>,
     P: BorrowMut<[MaybeUninit<T>]>,
@@ -39,7 +40,7 @@ where
             init_each,
             CoreAlloc::new(),
         );
-        let w = dumper.dump_async(source.into()).await;
+        let w = dumper.dump_async(source.deref()).await;
         if let Result::Err(report) = w {
             log::error!("[tests_::chunk_writer_] span_len({span_length}) err: {report:?}");
             break;
@@ -113,7 +114,7 @@ async fn u8_fill_copy_async_smoke() {
         panic!("[tests_::u8_fill_copy_async_smoke] try_split_shared");
     };
     let reader_handle = tokio::task::spawn(reader_filler_(reader));
-    let writer_handle = tokio::task::spawn(chunk_writer_(writer));
+    let writer_handle = tokio::task::spawn(writer_dumper_(writer));
     assert!(writer_handle.await.is_ok());
     assert!(reader_handle.await.is_ok());
 }
@@ -140,7 +141,7 @@ async fn u16_fill_copy_async_smoke() {
     else {
         panic!("[tests_::u16_fill_copy_async_smoke] try_split_shared");
     };
-    let writer_handle = tokio::task::spawn(chunk_writer_(writer));
+    let writer_handle = tokio::task::spawn(writer_dumper_(writer));
     let reader_handle = tokio::task::spawn(reader_filler_(reader));
     assert!(writer_handle.await.is_ok());
     assert!(reader_handle.await.is_ok());
@@ -168,7 +169,7 @@ async fn u32_fill_copy_async_smoke() {
     else {
         panic!("[tests_::u32_fill_copy_async_smoke] try_split_shared");
     };
-    let writer_handle = tokio::task::spawn(chunk_writer_(writer));
+    let writer_handle = tokio::task::spawn(writer_dumper_(writer));
     let reader_handle = tokio::task::spawn(reader_filler_(reader));
     assert!(writer_handle.await.is_ok());
     assert!(reader_handle.await.is_ok());
