@@ -2,7 +2,6 @@
 #![feature(min_specialization)]
 
 // to enable no hand-written poll
-#![feature(async_closure)]
 #![feature(async_fn_traits)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
@@ -10,7 +9,6 @@
 #![no_std]
 
 mod abs_;
-mod chunk_io_;
 mod peeker_;
 mod reader_;
 mod writer_;

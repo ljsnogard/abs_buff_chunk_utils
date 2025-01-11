@@ -1,7 +1,7 @@
 [package]
 name = "abs_buff_chunk_utils"
 version = "0.0.2"
-edition = "2021"
+edition = "2024"
 
 authors = ["lino <lino_snsalias@outlook.com>"]
 description = "Chunk IO utils for abs_buff crate."
@@ -12,8 +12,8 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-abs_buff = { git = "https://github.com/ljsnogard/abs_buff.git", branch = "dev-0.2.0" }
-recl-slices = { git = "https://github.com/ljsnogard/recl-slices.git", branch = "dev/0.1.0" }
+abs_buff = { git = "https://github.com/ljsnogard/abs_buff.git", branch = "dev/0.2.0" }
+segm_buff = { git = "https://github.com/ljsnogard/segm_buff.git", branch = "main" }
 
 [dev-dependencies]
 env_logger = { version = "0.11.*" }
@@ -23,7 +23,7 @@ chrono = { version = "0.4.*" }
 rand = { version = "0.8.*" }
 tokio = { version = "1", features = ["full"] }
 
-buffex = { git = "https://github.com/ljsnogard/buffex.git", branch = "dev-0.0.2" }
-mm_ptr = { git = "https://github.com/ljsnogard/mm_ptr.git", branch = "dev/0.1.2" }
-core_malloc = { git = "https://github.com/ljsnogard/core_malloc.git", branch = "dev/0.1.2" }
-spmv-oneshot = { git = "https://github.com/ljsnogard/spmv-oneshot.git", branch = "dev/0.1.2" }
+buffex = { git = "https://github.com/ljsnogard/buffex", branch = "dev/0.2.0" }
+mm_ptr = { git = "https://github.com/ljsnogard/mm_ptr", branch = "dev/0.1.2" }
+core_malloc = { git = "https://github.com/ljsnogard/core_malloc", branch = "dev/0.1.2" }
+spmv-oneshot = { git = "https://github.com/ljsnogard/spmv-oneshot", branch = "dev/0.1.2" }

@@ -1,9 +1,9 @@
-﻿use core::{
-    error::Error,
-    mem::MaybeUninit,
-};
+﻿use core::error::Error;
 
-use abs_buff::x_deps::abs_sync;
+use abs_buff::{
+    x_deps::abs_sync,
+    TrBuffSegmMut, TrBuffSegmRef,
+};
 use abs_sync::cancellation::TrIntoFutureMayCancel;
 
 /// To report the detail of aborted IO from a chunk filler or writer.
@@ -24,44 +24,40 @@ pub trait TrChunkIoAbort {
 /// minimum number of units (for example, bytes), from the internal buffer this 
 /// reader is holding, into the target buffer.
 pub trait TrChunkFiller<T = u8> {
-    type IoAbort<'a>: TrChunkIoAbort
+    type IoAbort: TrChunkIoAbort;
+
+    type FillAsync<'a, S>: TrIntoFutureMayCancel<
+        MayCancelOutput = Result<usize, Self::IoAbort>>
     where
-        T: 'a,
+        S: 'a + TrBuffSegmMut<T>,
         Self: 'a;
 
-    type FillAsync<'a>: TrIntoFutureMayCancel<'a,
-        MayCancelOutput = Result<usize, Self::IoAbort<'a>>>
-    where
-        T: 'a,
-        Self: 'a;
-
-    fn fill_async<'a>(
+    fn fill_async<'a, S: TrBuffSegmMut<T>>(
         &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> Self::FillAsync<'a>;
+        target: &'a mut S,
+    ) -> Self::FillAsync<'a, S>
+    where
+        Self: 'a;
 }
 
 /// A producer that is supposed to dump (move, clone, or copy) an exact number
 /// of units (for example, bytes), from the source buffer, into the internal
 /// storage this producer is holding.
 pub trait TrChunkDumper<T = u8> {
-    type IoAbort<'a>: TrChunkIoAbort
+    type IoAbort: TrChunkIoAbort;
+
+    type DumpAsync<'a, S>: TrIntoFutureMayCancel<
+        MayCancelOutput = Result<usize, Self::IoAbort>>
     where
-        T: 'a,
+        S: 'a + TrBuffSegmRef<T>,
         Self: 'a;
 
-    type DumpAsync<'a>: TrIntoFutureMayCancel<'a,
-        MayCancelOutput = Result<usize, Self::IoAbort<'a>>>
-    where
-        T: 'a,
-        Self: 'a;
-
-    fn dump_async<'a>(
+    fn dump_async<'a, S: TrBuffSegmRef<T>>(
         &'a mut self,
-        source: &'a [T],
-    ) -> Self::DumpAsync<'a>
+        source: &'a mut S,
+    ) -> Self::DumpAsync<'a, S>
     where
-        T: 'a;
+        Self: 'a;
 }
 
 #[derive(Debug)]

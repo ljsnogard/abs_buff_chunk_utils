@@ -1,17 +1,18 @@
 ﻿use core::{
-    borrow::BorrowMut,
-    cmp,
+    borrow::{Borrow, BorrowMut},
     future::{Future, IntoFuture},
     marker::PhantomData,
-    mem::MaybeUninit,
     ops::AsyncFnOnce,
     pin::Pin,
 };
 
-use abs_buff::{x_deps::abs_sync, TrBuffIterPeek};
+use abs_buff::{
+    x_deps::abs_sync,
+    TrBuffIterPeek, TrBuffSegmMut,
+};
 use abs_sync::cancellation::{
-    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel};
-use recl_slices::{NoReclaim, SliceMut};
+    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel,
+};
 
 use crate::{ChunkIoAbort, TrChunkFiller};
 
@@ -40,11 +41,11 @@ where
         }
     }
 
-    pub fn fill_async<'a>(
+    pub fn fill_async<'a, S: TrBuffSegmMut<T>>(
         &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> BuffPeekChunkFillAsync<'a, B, P, T> {
-        BuffPeekChunkFillAsync::new(self, target)
+        target: &'a mut S,
+    ) -> FillAsync<'a, S, B, P, T> {
+        FillAsync::new(self, target)
     }
 }
 
@@ -64,46 +65,48 @@ where
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
-    type IoAbort<'a> = ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>
+    type IoAbort = ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>;
+
+    type FillAsync<'a, S> = FillAsync<'a, S, B, P, T>
     where
-        T: 'a,
+        S: 'a + TrBuffSegmMut<T>,
         Self: 'a;
 
-    type FillAsync<'a> = BuffPeekChunkFillAsync<'a, B, P, T>
-    where
-        T: 'a,
-        Self: 'a;
-
-    #[inline(always)]
-    fn fill_async<'a>(
+    #[inline]
+    fn fill_async<'a, S: TrBuffSegmMut<T>>(
         &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> Self::FillAsync<'a> {
+        target: &'a mut S,
+    ) -> Self::FillAsync<'a, S>
+    where
+        Self: 'a,
+    {
         BuffPeekAsChunkFiller::fill_async(self, target)
     }
 }
 
-pub struct BuffPeekChunkFillAsync<'a, B, P, T>
+pub struct FillAsync<'a, S, B, P, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
     filler_: &'a mut BuffPeekAsChunkFiller<B, P, T>,
-    target_: &'a mut [MaybeUninit<T>],
+    target_: &'a mut S,
 }
 
-impl<'a, B, P, T> BuffPeekChunkFillAsync<'a, B, P, T>
+impl<'a, S, B, P, T> FillAsync<'a, S, B, P, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
     pub fn new(
         filler: &'a mut BuffPeekAsChunkFiller<B, P, T>,
-        target: &'a mut [MaybeUninit<T>],
+        target: &'a mut S,
     ) -> Self {
-        BuffPeekChunkFillAsync {
+        FillAsync {
             filler_: filler,
             target_: target,
         }
@@ -114,63 +117,42 @@ where
         mut cancel: Pin<&'a mut C>,
     ) -> Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>> {
         let buffer = self.filler_.buffer_.borrow_mut();
-        let target_len = self.target_.len();
-        let mut perform_len = 0usize;
+        let mut item_count = 0usize;
         loop {
-            if perform_len >= target_len {
-                break Result::Ok(perform_len);
+            let target_len = self.target_.len();
+            if item_count >= target_len {
+                break Result::Ok(item_count);
             }
             let r = buffer
                 .peek_async()
                 .may_cancel_with(cancel.as_mut())
                 .await;
-            let Result::Ok(src_iter) = r else {
-                let Result::Err(last_error) = r else {
-                    unreachable!("[BuffPeekChunkFillAsync::may_cancel_with]")
-                };
-                let remnants = target_len - perform_len;
-                break Result::Err(ChunkIoAbort::new(last_error, remnants));
-            };
-            for src in src_iter.into_iter() {
-                let src_len = src.len();
-                let opr_len = cmp::min(src_len, target_len - perform_len);
-                if opr_len == 0 {
-                    break;
+            match r {
+                Result::Ok(src_iter) => {
+                    for src in src_iter.into_iter() {
+                        let opr_len = self.target_.clone_from_slice(src.borrow());
+                        item_count += opr_len;
+                    }
+                },
+                Result::Err(last_error) => {
+                    break Result::Err(ChunkIoAbort::new(last_error, item_count));
                 }
-
-                #[cfg(test)]
-                log::trace!(
-                    "[BuffPeekChunkFillAsync::may_cancel_with] \
-                    src_len({src_len}) opr_len({opr_len})");
-
-                let dst = &mut
-                    self.target_[perform_len..perform_len + opr_len];
-                let mut dst = unsafe {
-                    // SliceMut will properly handle the problem of dropping 
-                    // items of the slice caused by transmuting from
-                    // &mut [MaybeUninit<T>] to &mut [T] during overwritting.
-                    SliceMut::new(
-                        dst, 
-                        Option::<NoReclaim>::None)
-                };
-                dst.clone_from_slice(&src[..opr_len]);
-                perform_len += opr_len;
             }
         }
     }
 }
 
-impl<'a, C, B, P, T> AsyncFnOnce<(Pin<&'a mut C>,)>
-for BuffPeekChunkFillAsync<'a, B, P, T>
+impl<'a, C, S, B, P, T> AsyncFnOnce<(Pin<&'a mut C>,)>
+for FillAsync<'a, S, B, P, T>
 where
     C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
     type CallOnceFuture = impl Future<Output = Self::Output>;
-    type Output =
-        Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>>;
+    type Output = Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>>;
 
     #[inline]
     extern "rust-call" fn async_call_once(
@@ -183,14 +165,15 @@ where
 }
 
 
-impl<'a, B, P, T> IntoFuture for BuffPeekChunkFillAsync<'a, B, P, T>
+impl<'a, S, B, P, T> IntoFuture for FillAsync<'a, S, B, P, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
-    type IntoFuture = <Self as AsyncFnOnce<(Pin<&'a mut NonCancellableToken>,)>>
-        ::CallOnceFuture;
+    type IntoFuture = <Self as
+        AsyncFnOnce<(Pin<&'a mut NonCancellableToken>,)>>::CallOnceFuture;
 
     type Output = <Self::IntoFuture as Future>::Output;
 
@@ -200,8 +183,9 @@ where
     }
 }
 
-impl<'a, B, P, T> TrIntoFutureMayCancel<'a> for BuffPeekChunkFillAsync<'a, B, P, T>
+impl<S, B, P, T> TrIntoFutureMayCancel for FillAsync<'_, S, B, P, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
     P: TrBuffIterPeek<T>,
     T: Clone,
@@ -209,13 +193,13 @@ where
     type MayCancelOutput = <Self as IntoFuture>::Output;
 
     #[inline]
-    fn may_cancel_with<C>(
+    fn may_cancel_with<'f, C: TrCancellationToken>(
         self,
-        cancel: Pin<&'a mut C>,
+        cancel: Pin<&'f mut C>,
     ) -> impl Future<Output = Self::MayCancelOutput>
     where
-        C: TrCancellationToken,
+        Self: 'f,
     {
-        BuffPeekChunkFillAsync::may_cancel_with(self, cancel)
+        FillAsync::may_cancel_with(self, cancel)
     }
 }

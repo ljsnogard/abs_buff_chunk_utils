@@ -1,5 +1,6 @@
 ﻿use core::{
     borrow::{Borrow, BorrowMut},
+    future::IntoFuture,
     mem::MaybeUninit,
     ops::Deref,
 };
@@ -14,6 +15,7 @@ use mm_ptr::{Shared, Owned};
 use spmv_oneshot::x_deps::atomex;
 
 use buffex::ring_buffer::*;
+use segm_buff::{BuffSegmReclaim, SegmMut, SegmRef};
 
 use crate::{BuffReadAsChunkFiller, ChunkDumper};
 
@@ -35,22 +37,22 @@ where
         if span_length > capacity {
             break;
         }
-        let source = Owned::new_slice(
+        let mut source = SegmRef::no_reclaim(Owned::new_slice(
             span_length,
             init_each,
             CoreAlloc::new(),
-        );
-        let w = dumper.dump_async(source.deref()).await;
+        ));
+        let w = dumper.dump_async(&mut source).await;
         if let Result::Err(report) = w {
-            log::error!("[tests_::chunk_writer_] span_len({span_length}) err: {report:?}");
+            log::error!("[tests_::writer_dumper_] span_len({span_length}) err: {report:?}");
             break;
         };
         let Result::Ok(copy_len) = w else { unreachable!() };
-        log::trace!("[tests_::chunk_writer_] span_len({span_length}) copy len({copy_len})");
+        log::trace!("[tests_::writer_dumper_] span_len({span_length}) copy len({copy_len})");
         assert_eq!(copy_len, span_length);
         span_length += 1;
     }
-    log::info!("chunk writer exits");
+    log::info!("[tests_::writer_dumper_] exits");
 }
 
 async fn reader_filler_<B, P, T, O>(reader: BuffRx<B, P, T, O>)
@@ -67,10 +69,10 @@ where
         if span_length > capacity {
             break;
         }
-        let mut target = Owned::new_zeroed_slice(
+        let mut target = SegmMut::no_reclaim(Owned::new_zeroed_slice(
             span_length,
             CoreAlloc::new(),
-        );
+        ));
         let r = filler.fill_async(&mut target).await;
         if let Result::Err(report) = r {
             log::error!("[tests_::reader_filler_] span_len({span_length}) err: {report:?}");
@@ -88,7 +90,7 @@ where
         }
         span_length += 1;
     }
-    log::info!("reader filler exits");
+    log::info!("[tests_::reader_filler_] exits");
 }
 
 #[tokio::test]

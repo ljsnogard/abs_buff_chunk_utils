@@ -1,6 +1,5 @@
 ﻿use core::{
     borrow::BorrowMut,
-    cmp,
     future::{Future, IntoFuture},
     iter::IntoIterator,
     marker::PhantomData,
@@ -8,14 +7,15 @@
     pin::Pin,
 };
 
-use abs_buff::{x_deps::abs_sync, TrBuffIterWrite};
-use abs_sync::cancellation::{
-    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel};
-
-use crate::{
-    chunk_io_::bitwise_copy_items_,
-    ChunkIoAbort, TrChunkDumper,
+use abs_buff::{
+    x_deps::abs_sync,
+    TrBuffIterWrite, TrBuffSegmMut, TrBuffSegmRef,
 };
+use abs_sync::cancellation::{
+    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel,
+};
+
+use crate::{ChunkIoAbort, TrChunkDumper};
 
 pub struct ChunkDumper<B, W, T>
 where
@@ -40,10 +40,10 @@ where
         }
     }
 
-    pub fn dump_async<'a>(
+    pub fn dump_async<'a, S: TrBuffSegmRef<T>>(
         &'a mut self,
-        source: &'a [T],
-    ) -> DumpAsync<'a, B, W, T> {
+        source: &'a mut S,
+    ) -> DumpAsync<'a, S, B, W, T> {
         DumpAsync::new(self, source)
     }
 }
@@ -62,45 +62,44 @@ where
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
-    type IoAbort<'a> = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>
-    where
-        T: 'a,
-        Self: 'a;
+    type IoAbort = ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>;
 
-    type DumpAsync<'a> = DumpAsync<'a, B, W, T>
+    type DumpAsync<'a, S> = DumpAsync<'a, S, B, W, T>
     where
-        T: 'a,
+        S: 'a + TrBuffSegmRef<T>,
         Self: 'a;
 
     #[inline]
-    fn dump_async<'a>(
+    fn dump_async<'a, S: TrBuffSegmRef<T>>(
         &'a mut self,
-        source: &'a [T],
-    ) -> Self::DumpAsync<'a>
+        source: &'a mut S,
+    ) -> Self::DumpAsync<'a, S>
     where
-        T: 'a,
+        Self: 'a,
     {
         ChunkDumper::dump_async(self, source)
     }
 }
 
-pub struct DumpAsync<'a, B, W, T>
+pub struct DumpAsync<'a, S, B, W, T>
 where
+    S: TrBuffSegmRef<T>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     dumper_: &'a mut ChunkDumper<B, W, T>,
-    source_: &'a [T],
+    source_: &'a mut S,
 }
 
-impl<'a, B, W, T> DumpAsync<'a, B, W, T>
+impl<'a, S, B, W, T> DumpAsync<'a, S, B, W, T>
 where
+    S: TrBuffSegmRef<T>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
     pub const fn new(
         dumper: &'a mut ChunkDumper<B, W, T>,
-        source: &'a [T],
+        source: &'a mut S,
     ) -> Self {
         DumpAsync {
             dumper_: dumper,
@@ -112,45 +111,42 @@ where
         self,
         mut cancel: Pin<&'a mut C>,
     ) -> Result<usize, ChunkIoAbort<<W as TrBuffIterWrite<T>>::Err>> {
-        let target = self.dumper_.buffer_.borrow_mut();
-        let source: &[T] = self.source_;
-        let source_len = source.len();
-        let mut perform_len = 0usize;
+        let src_init_len = self.source_.len();
+        let mut item_count = 0usize;
         loop {
-            if perform_len >= source_len {
-                break Result::Ok(perform_len);
+            if item_count == src_init_len {
+                break Result::Ok(item_count);
             }
             #[cfg(test)]
             log::trace!(
-                "[DumpAsync::dump_slice_async_] \
-                source_len({source_len}), perform_len({perform_len})"
+                "[writer_::DumpAsync::may_cancel_with] \
+                src_init_len({src_init_len}), item_count({item_count})"
             );
-            let w = target
-                .write_async(source_len - perform_len)
+            let writer = self.dumper_.buffer_.borrow_mut();
+            let res = writer
+                .write_async(src_init_len - item_count)
                 .may_cancel_with(cancel.as_mut())
                 .await;
-            let Result::Ok(dst_iter) = w else {
-                let Result::Err(last_error) = w else {
-                    unreachable!("[DumpAsync::dump_slice_async_]")
-                };
-                break Result::Err(ChunkIoAbort::new(last_error, perform_len));
-            };
-            for mut dst in dst_iter.into_iter() {
-                let dst_len = dst.len();
-                let opr_len = cmp::min(dst_len, source_len - perform_len);
-                debug_assert!(opr_len + perform_len <= source_len);
-                let src = &source[perform_len..perform_len + opr_len];
-                let dst = &mut dst[..opr_len];
-                unsafe { bitwise_copy_items_(src, dst) };
-                perform_len += opr_len;
+            match res {
+                Result::Ok(dst_iter) => {
+                    for mut dst_segm in dst_iter.into_iter() {
+                        let c = dst_segm.dump_from_segm(self.source_);
+                        item_count += c;
+                    }
+                },
+                Result::Err(last_error) => {
+                    break Result::Err(ChunkIoAbort::new(last_error, item_count));
+                },
             }
         }
     }
 }
 
-impl<'a, C, B, W, T> AsyncFnOnce<(Pin<&'a mut C>, )> for DumpAsync<'a, B, W, T>
+impl<'a, C, S, B, W, T> AsyncFnOnce<(Pin<&'a mut C>, )>
+for DumpAsync<'a, S, B, W, T>
 where
     C: TrCancellationToken,
+    S: TrBuffSegmRef<T>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
@@ -167,8 +163,9 @@ where
     }
 }
 
-impl<'a, B, W, T> IntoFuture for DumpAsync<'a, B, W, T>
+impl<'a, S, B, W, T> IntoFuture for DumpAsync<'a, S, B, W, T>
 where
+    S: TrBuffSegmRef<T>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
@@ -182,8 +179,9 @@ where
     }
 }
 
-impl<'a, B, W, T> TrIntoFutureMayCancel<'a> for DumpAsync<'a, B, W, T>
+impl<S, B, W, T> TrIntoFutureMayCancel for DumpAsync<'_, S, B, W, T>
 where
+    S: TrBuffSegmRef<T>,
     B: BorrowMut<W>,
     W: TrBuffIterWrite<T>,
 {
@@ -191,12 +189,12 @@ where
         <<Self as IntoFuture>::IntoFuture as Future>::Output;
 
     #[inline]
-    fn may_cancel_with<C>(
+    fn may_cancel_with<'f, C: TrCancellationToken>(
         self,
-        cancel: Pin<&'a mut C>,
+        cancel: Pin<&'f mut C>,
     ) -> impl Future<Output = Self::MayCancelOutput>
     where
-        C: TrCancellationToken,
+        Self: 'f,
     {
         DumpAsync::may_cancel_with(self, cancel)
     }

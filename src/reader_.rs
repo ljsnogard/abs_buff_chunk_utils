@@ -1,22 +1,20 @@
 ﻿use core::{
-    borrow::BorrowMut,
-    cmp,
+    borrow::{Borrow, BorrowMut},
     future::{Future, IntoFuture},
     marker::PhantomData,
-    mem::MaybeUninit,
     ops::AsyncFnOnce,
     pin::Pin,
 };
 
-use abs_buff::{x_deps::abs_sync, TrBuffIterRead};
+use abs_buff::{
+    x_deps::abs_sync,
+    TrBuffIterRead, TrBuffSegmMut,
+};
 use abs_sync::cancellation::{
     NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel,
 };
 
-use crate::{
-    chunk_io_::bitwise_copy_items_,
-    ChunkIoAbort, TrChunkFiller,
-};
+use crate::{ChunkIoAbort, TrChunkFiller};
 
 pub struct BuffReadAsChunkFiller<B, R, T>
 where
@@ -41,10 +39,10 @@ where
         }
     }
 
-    pub fn fill_async<'a>(
+    pub fn fill_async<'a, S: TrBuffSegmMut<T>>(
         &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> FillAsync<'a, B, R, T> {
+        target: &'a mut S,
+    ) -> FillAsync<'a, S, B, R, T> {
         FillAsync::new(self, target)
     }
 }
@@ -63,38 +61,44 @@ where
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
-    type IoAbort<'a> = ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>
+    type IoAbort = ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>;
+
+    type FillAsync<'a, S> = FillAsync<'a, S, B, R, T>
     where
+        S: 'a + TrBuffSegmMut<T>,
         Self: 'a;
 
-    type FillAsync<'a> = FillAsync<'a, B, R, T> where Self: 'a;
-
     #[inline]
-    fn fill_async<'a>(
+    fn fill_async<'a, S: TrBuffSegmMut<T>>(
         &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> Self::FillAsync<'a> {
+        target: &'a mut S,
+    ) -> Self::FillAsync<'a, S>
+    where
+        Self: 'a,
+    {
         BuffReadAsChunkFiller::fill_async(self, target)
     }
 }
 
-pub struct FillAsync<'a, B, R, T>
+pub struct FillAsync<'a, S, B, R, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
     filler_: &'a mut BuffReadAsChunkFiller<B, R, T>,
-    target_: &'a mut [MaybeUninit<T>],
+    target_: &'a mut S,
 }
 
-impl<'a, B, R, T> FillAsync<'a, B, R, T>
+impl<'a, S, B, R, T> FillAsync<'a, S, B, R, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
     pub fn new(
         filler: &'a mut BuffReadAsChunkFiller<B, R, T>,
-        target: &'a mut [MaybeUninit<T>],
+        target: &'a mut S,
     ) -> Self {
         FillAsync {
             filler_: filler,
@@ -106,56 +110,43 @@ where
         self,
         mut cancel: Pin<&'a mut C>,
     ) -> Result<usize, ChunkIoAbort<<R as TrBuffIterRead<T>>::Err>> {
-        let buffer = self.filler_.buffer_.borrow_mut();
-        let target_len = self.target_.len();
-        let mut perform_len = 0usize;
+        let dst_init_len = self.target_.len();
+        let mut item_count = 0usize;
         loop {
-            if perform_len >= target_len {
-                break Result::Ok(perform_len);
+            if item_count == dst_init_len {
+                break Result::Ok(item_count);
             }
             #[cfg(test)]
             log::trace!(
-                "[reader_::FillAsync::fill_clone_async_] \
-                target_len({target_len}), perform_len({perform_len})"
+                "[reader_::FillAsync::may_cancel_with] \
+                dst_init_len({dst_init_len}), item_count({item_count})"
             );
-            let r = buffer
-                .read_async(target_len - perform_len)
+            let reader = self.filler_.buffer_.borrow_mut();
+            let r = reader
+                .read_async(dst_init_len - item_count)
                 .may_cancel_with(cancel.as_mut())
                 .await;
-            let Result::Ok(src_iter) = r else {
-                let Result::Err(last_error) = r else {
-                    unreachable!("[reader_::FillAsync::fill_clone_async_]")
-                };
-                let remnants = target_len - perform_len;
-                break Result::Err(ChunkIoAbort::new(last_error, remnants));
-            };
-            for src in src_iter.into_iter() {
-                let src_len = src.len();
-                let opr_len = cmp::min(src_len, target_len - perform_len);
-                if opr_len == 0 {
-                    break;
-                } else {
-                    #[cfg(test)]
-                    log::trace!(
-                        "[reader_::FillAsync::fill_clone_async_] \
-                        read_async src_len({src_len}), opr_len({opr_len})"
-                    );
-                }
-                debug_assert!(opr_len + perform_len <= target_len);
-                let dst = &mut
-                    self.target_[perform_len..perform_len + opr_len];
-                let src = &src[..opr_len];
-                unsafe { bitwise_copy_items_(src, dst) };
-                perform_len += opr_len;
+            match r {
+                Result::Ok(src_iter) => {
+                    for mut src in src_iter.into_iter() {
+                        let opr_len = self.target_.dump_from_segm(&mut src);
+                        debug_assert!(src.borrow().is_empty());
+                        item_count += opr_len;
+                    }
+                },
+                Result::Err(last_error) => {
+                    break Result::Err(ChunkIoAbort::new(last_error, item_count));
+                },
             }
         }
     }
 }
 
-impl<'a, C, B, R, T> AsyncFnOnce<(Pin<&'a mut C>,)>
-for FillAsync<'a, B, R, T>
+impl<'a, C, S, B, R, T> AsyncFnOnce<(Pin<&'a mut C>,)>
+for FillAsync<'a, S, B, R, T>
 where
     C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
@@ -172,8 +163,9 @@ where
     }
 }
 
-impl<'a, B, R, T> IntoFuture for FillAsync<'a, B, R, T>
+impl<'a, S, B, R, T> IntoFuture for FillAsync<'a, S, B, R, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
@@ -188,20 +180,21 @@ where
     }
 }
 
-impl<'a, B, R, T> TrIntoFutureMayCancel<'a> for FillAsync<'a, B, R, T>
+impl<S, B, R, T> TrIntoFutureMayCancel for FillAsync<'_, S, B, R, T>
 where
+    S: TrBuffSegmMut<T>,
     B: BorrowMut<R>,
     R: TrBuffIterRead<T>,
 {
     type MayCancelOutput = <Self as IntoFuture>::Output;
 
     #[inline]
-    fn may_cancel_with<C>(
+    fn may_cancel_with<'f, C: TrCancellationToken>(
         self,
-        cancel: Pin<&'a mut C>,
+        cancel: Pin<&'f mut C>,
     ) -> impl Future<Output = Self::MayCancelOutput>
     where
-        C: TrCancellationToken,
+        Self: 'f,
     {
         FillAsync::may_cancel_with(self, cancel)
     }
