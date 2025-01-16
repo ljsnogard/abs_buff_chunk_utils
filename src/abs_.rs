@@ -1,10 +1,8 @@
 ﻿use core::error::Error;
 
-use abs_buff::{
-    x_deps::abs_sync,
-    TrBuffSegmMut, TrBuffSegmRef,
-};
-use abs_sync::cancellation::TrIntoFutureMayCancel;
+use abs_buff::{TrBuffSegmMut, TrBuffSegmRef};
+use abs_sync::cancellation::TrMayCancel;
+use segm_buff::x_deps::{abs_buff, abs_sync};
 
 /// To report the detail of aborted IO from a chunk filler or writer.
 /// 
@@ -26,7 +24,7 @@ pub trait TrChunkIoAbort {
 pub trait TrChunkFiller<T = u8> {
     type IoAbort: TrChunkIoAbort;
 
-    type FillAsync<'a, S>: TrIntoFutureMayCancel<
+    type FillAsync<'a, S>: TrMayCancel<'a,
         MayCancelOutput = Result<usize, Self::IoAbort>>
     where
         S: 'a + TrBuffSegmMut<T>,
@@ -46,7 +44,7 @@ pub trait TrChunkFiller<T = u8> {
 pub trait TrChunkDumper<T = u8> {
     type IoAbort: TrChunkIoAbort;
 
-    type DumpAsync<'a, S>: TrIntoFutureMayCancel<
+    type DumpAsync<'a, S>: TrMayCancel<'a,
         MayCancelOutput = Result<usize, Self::IoAbort>>
     where
         S: 'a + TrBuffSegmRef<T>,

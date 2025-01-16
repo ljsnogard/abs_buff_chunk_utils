@@ -1,5 +1,5 @@
-// specialization for Clone and Copy
-#![feature(min_specialization)]
+// To allow Box<dyn Future>
+#![feature(allocator_api)]
 
 // to enable no hand-written poll
 #![feature(async_fn_traits)]
@@ -7,6 +7,8 @@
 #![feature(unboxed_closures)]
 
 #![no_std]
+
+extern crate alloc;
 
 mod abs_;
 mod peeker_;
@@ -22,5 +24,7 @@ pub use writer_::ChunkDumper;
 mod tests_;
 
 pub mod x_deps {
-    pub use abs_buff;
+    pub use segm_buff;
+
+    pub use segm_buff::x_deps::{abs_buff, abs_sync};
 }

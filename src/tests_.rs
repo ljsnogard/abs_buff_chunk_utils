@@ -1,8 +1,6 @@
 ﻿use core::{
     borrow::{Borrow, BorrowMut},
-    future::IntoFuture,
     mem::MaybeUninit,
-    ops::Deref,
 };
 
 use atomex::{
@@ -15,7 +13,7 @@ use mm_ptr::{Shared, Owned};
 use spmv_oneshot::x_deps::atomex;
 
 use buffex::ring_buffer::*;
-use segm_buff::{BuffSegmReclaim, SegmMut, SegmRef};
+use segm_buff::{SegmMut, SegmRef};
 
 use crate::{BuffReadAsChunkFiller, ChunkDumper};
 

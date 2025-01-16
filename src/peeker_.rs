@@ -4,15 +4,15 @@
     marker::PhantomData,
     ops::AsyncFnOnce,
     pin::Pin,
+    ptr::NonNull,
+    task::{Context, Poll},
 };
 
-use abs_buff::{
-    x_deps::abs_sync,
-    TrBuffIterPeek, TrBuffSegmMut,
-};
+use abs_buff::{TrBuffIterPeek, TrBuffSegmMut};
 use abs_sync::cancellation::{
-    NonCancellableToken, TrCancellationToken, TrIntoFutureMayCancel,
+    NonCancellableToken, TrCancellationToken, TrMayCancel,
 };
+use segm_buff::x_deps::{abs_buff, abs_sync};
 
 use crate::{ChunkIoAbort, TrChunkFiller};
 
@@ -112,58 +112,16 @@ where
         }
     }
 
-    pub async fn may_cancel_with<C: TrCancellationToken>(
+    pub fn may_cancel_with<'f, C: TrCancellationToken>(
         self,
-        mut cancel: Pin<&'a mut C>,
-    ) -> Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>> {
-        let buffer = self.filler_.buffer_.borrow_mut();
-        let mut item_count = 0usize;
-        loop {
-            let target_len = self.target_.len();
-            if item_count >= target_len {
-                break Result::Ok(item_count);
-            }
-            let r = buffer
-                .peek_async()
-                .may_cancel_with(cancel.as_mut())
-                .await;
-            match r {
-                Result::Ok(src_iter) => {
-                    for src in src_iter.into_iter() {
-                        let opr_len = self.target_.clone_from_slice(src.borrow());
-                        item_count += opr_len;
-                    }
-                },
-                Result::Err(last_error) => {
-                    break Result::Err(ChunkIoAbort::new(last_error, item_count));
-                }
-            }
-        }
+        cancel: Pin<&'f mut C>,
+    ) -> FillFuture<'f, C, S, B, P, T>
+    where
+        Self: 'f,
+    {
+        FillFuture::new(self.filler_, self.target_, cancel)
     }
 }
-
-impl<'a, C, S, B, P, T> AsyncFnOnce<(Pin<&'a mut C>,)>
-for FillAsync<'a, S, B, P, T>
-where
-    C: TrCancellationToken,
-    S: TrBuffSegmMut<T>,
-    B: BorrowMut<P>,
-    P: TrBuffIterPeek<T>,
-    T: Clone,
-{
-    type CallOnceFuture = impl Future<Output = Self::Output>;
-    type Output = Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>>;
-
-    #[inline]
-    extern "rust-call" fn async_call_once(
-        self,
-        args: (Pin<&'a mut C>,),
-    ) -> Self::CallOnceFuture {
-        let cancel = args.0;
-        self.may_cancel_with(cancel)
-    }
-}
-
 
 impl<'a, S, B, P, T> IntoFuture for FillAsync<'a, S, B, P, T>
 where
@@ -172,18 +130,17 @@ where
     P: TrBuffIterPeek<T>,
     T: Clone,
 {
-    type IntoFuture = <Self as
-        AsyncFnOnce<(Pin<&'a mut NonCancellableToken>,)>>::CallOnceFuture;
-
+    type IntoFuture = FillFuture<'a, NonCancellableToken, S, B, P, T>;
     type Output = <Self::IntoFuture as Future>::Output;
 
     #[inline]
     fn into_future(self) -> Self::IntoFuture {
-        self(NonCancellableToken::pinned())
+        let cancel = NonCancellableToken::pinned();
+        FillFuture::new(self.filler_, self.target_, cancel)
     }
 }
 
-impl<S, B, P, T> TrIntoFutureMayCancel for FillAsync<'_, S, B, P, T>
+impl<'a, S, B, P, T> TrMayCancel<'a> for FillAsync<'a, S, B, P, T>
 where
     S: TrBuffSegmMut<T>,
     B: BorrowMut<P>,
@@ -196,10 +153,181 @@ where
     fn may_cancel_with<'f, C: TrCancellationToken>(
         self,
         cancel: Pin<&'f mut C>,
-    ) -> impl Future<Output = Self::MayCancelOutput>
+    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
     where
         Self: 'f,
     {
         FillAsync::may_cancel_with(self, cancel)
+    }
+}
+
+pub struct FillFuture<'a, C, S, B, P, T>
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone,
+{
+    filler_: &'a mut BuffPeekAsChunkFiller<B, P, T>,
+    target_: &'a mut S,
+    cancel_: Pin<&'a mut C>,
+    future_: Option<FutImplType<'a, C, S, B, P, T>>,
+}
+
+impl<'a, C, S, B, P, T> FillFuture<'a, C, S, B, P, T>
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone,
+{
+    pub const fn new(
+        filler: &'a mut BuffPeekAsChunkFiller<B, P, T>,
+        target: &'a mut S,
+        cancel: Pin<&'a mut C>,
+    ) -> Self {
+        FillFuture {
+            filler_: filler,
+            target_: target,
+            cancel_: cancel,
+            future_: Option::None,
+        }
+    }
+}
+
+impl<C, S, B, P, T> Future for FillFuture<'_, C, S, B, P, T>
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone,
+{
+    type Output = FillResult<P, T>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
+        let mut this = unsafe {
+            let p = self.as_mut().get_unchecked_mut();
+            NonNull::new_unchecked(p)
+        };
+        loop {
+            let mut p = unsafe {
+                let ptr = &mut this.as_mut().future_;
+                NonNull::new_unchecked(ptr)
+            };
+            let opt_f = unsafe { p.as_mut() };
+            if let Option::Some(f) = opt_f {
+                let f_pinned = unsafe { Pin::new_unchecked(f) };
+                break f_pinned.poll(cx)
+            } else {
+                let h = FutImpl(unsafe { 
+                    Pin::new_unchecked(this.as_mut())
+                });
+                let f = h();
+                let opt = unsafe { p.as_mut() };
+                *opt = Option::Some(f);
+            }
+        }
+    }
+}
+
+unsafe impl<C, S, B, P, T> Send for FillFuture<'_, C, S, B, P, T>
+where
+    C: Send + Sync + TrCancellationToken,
+    S: Send + Sync + TrBuffSegmMut<T>,
+    B: Send + Sync + BorrowMut<P>,
+    P: Send + Sync + TrBuffIterPeek<T>,
+    T: Send + Sync + Clone,
+{}
+
+unsafe impl<C, S, B, P, T> Sync for FillFuture<'_, C, S, B, P, T>
+where
+    C: Send + Sync + TrCancellationToken,
+    S: Send + Sync + TrBuffSegmMut<T>,
+    B: Send + Sync + BorrowMut<P>,
+    P: Send + Sync + TrBuffIterPeek<T>,
+    T: Send + Sync + Clone,
+{}
+
+struct FutImpl<'a, C, S, B, P, T>(Pin<&'a mut FillFuture<'a, C, S, B, P, T>>)
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone;
+
+impl<C, S, B, P, T> AsyncFnOnce<()> for FutImpl<'_, C, S, B, P, T>
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone,
+{
+    type CallOnceFuture = impl Future<Output = Self::Output>;
+    type Output = FillResult<P, T>;
+
+    #[inline]
+    extern "rust-call" fn async_call_once(
+        self,
+        _: (),
+    ) -> Self::CallOnceFuture {
+        let future = unsafe { self.0.get_unchecked_mut() };
+        Self::may_cancel_impl(
+            future.filler_,
+            future.target_,
+            future.cancel_.as_mut(),
+        )
+    }
+}
+
+pub(super) type FillResult<P, T> = 
+    Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>>;
+
+type FutImplType<'a, C, S, B, P, T> =
+    <FutImpl<'a, C, S, B, P, T> as AsyncFnOnce<()>>::CallOnceFuture;
+
+impl<C, S, B, P, T> FutImpl<'_, C, S, B, P, T>
+where
+    C: TrCancellationToken,
+    S: TrBuffSegmMut<T>,
+    B: BorrowMut<P>,
+    P: TrBuffIterPeek<T>,
+    T: Clone,
+{
+    pub async fn may_cancel_impl<'f>(
+        filler: &'f mut BuffPeekAsChunkFiller<B, P, T>,
+        target: &'f mut S,
+        mut cancel: Pin<&'f mut C>,
+    ) -> Result<usize, ChunkIoAbort<<P as TrBuffIterPeek<T>>::Err>> {
+        let buffer = filler.buffer_.borrow_mut();
+        let mut item_count = 0usize;
+        loop {
+            let target_len = target.len();
+            if item_count >= target_len {
+                break Result::Ok(item_count);
+            }
+            let r = buffer
+                .peek_async()
+                .may_cancel_with(cancel.as_mut())
+                .await;
+            match r {
+                Result::Ok(src_iter) => {
+                    for src in src_iter.into_iter() {
+                        let opr_len = target.clone_from_slice(src.borrow());
+                        item_count += opr_len;
+                    }
+                },
+                Result::Err(last_error) => {
+                    break Result::Err(ChunkIoAbort::new(last_error, item_count));
+                }
+            }
+        }
     }
 }
